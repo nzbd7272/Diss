@@ -1,0 +1,90 @@
+# ==============================================================================
+# Pipeline Step 2: Epigenomic Responsiveness, Candidate Ranking & Pathway Analysis
+# Description: Evaluates spatial methylation asymmetry, aggregates site-level
+#              shifts by gene, ranks top candidates, and performs functional
+#              pathway enrichment (gprofiler2).
+# ==============================================================================
+
+# Load required libraries
+library(data.table)
+library(ggplot2)
+library(gprofiler2)
+
+# --- 1. Load Processed Datasets ---
+promoters   <- fread("promoter_cpg_intersect.bed")
+gene_bodies <- fread("gene_body_cpg_intersect.bed")
+pain_cpgs   <- fread("pain_panel_cpg_intersect.bed")
+
+# Set standard column names (V5: delta_meth, V13: Naive %, V14: Exp %, V10: Gene Symbol)
+setnames(promoters, c("V5", "V13", "V14", "V10"), c("delta_meth", "naive_meth", "exp_meth", "gene_symbol"), skip_absent = TRUE)
+setnames(gene_bodies, c("V5", "V13", "V14", "V10"), c("delta_meth", "naive_meth", "exp_meth", "gene_symbol"), skip_absent = TRUE)
+setnames(pain_cpgs, c("V5", "V13", "V14", "V10"), c("delta_meth", "naive_meth", "exp_meth", "gene_symbol"), skip_absent = TRUE)
+
+# --- 2. Global Concordance & Density Distributions ---
+# Plot 1A: Hexagonal Binning Density Plot (Naive vs Experimental)
+p1a <- ggplot(gene_bodies, aes(x = naive_meth, y = exp_meth)) +
+  stat_bin_hex(bins = 100) +
+  scale_fill_viridis_c(trans = "log10", option = "magma") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "white") +
+  theme_minimal() +
+  labs(title = "Global CpG Methylation Architecture",
+       x = "Naive Baseline Methylation (%)",
+       y = "Experimental Chronic Pain Methylation (%)",
+       fill = "Log10 CpG Count")
+
+# Plot 1B: Feature-Specific Spatial Asymmetry (Density)
+promoters[, feature := "Promoter (±2kb TSS)"]
+gene_bodies[, feature := "Gene Body"]
+combined_features <- rbind(promoters[, .(delta_meth, feature)], gene_bodies[, .(delta_meth, feature)])
+
+p1b <- ggplot(combined_features, aes(x = delta_meth, fill = feature)) +
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values = c("Promoter (±2kb TSS)" = "#1f77b4", "Gene Body" = "#ff7f0e")) +
+  theme_minimal() +
+  labs(title = "Feature-Specific Spatial Asymmetry",
+       x = "Differential Methylation (%) [Experimental - Naive]",
+       y = "Density",
+       fill = "Genomic Feature")
+
+# --- 3. Global Responsiveness Thresholding (|Δ| >= 5%) ---
+resp_promoters   <- mean(abs(promoters$delta_meth) >= 5) * 100
+resp_gene_bodies <- mean(abs(gene_bodies$delta_meth) >= 5) * 100
+
+cat(sprintf("Epigenetic Responsiveness (|Δ| >= 5%%):\n Promoters: %.2f%%\n Gene Bodies: %.2f%%\n", 
+            resp_promoters, resp_gene_bodies))
+
+# --- 4. Candidate Gene Prioritization (Hypermethylation Density Δ >= 10%) ---
+candidate_ranking <- pain_cpgs[delta_meth >= 10, .(
+  hyper_cpg_count = .N,
+  mean_delta_meth = mean(delta_meth)
+), by = gene_symbol][order(-hyper_cpg_count)]
+
+cat("\nTop 10 Hypermethylated Candidate Genes:\n")
+print(head(candidate_ranking, 10))
+
+# Save candidate gene summary
+fwrite(candidate_ranking, "ranked_pain_candidate_genes.csv")
+
+# --- 5. Functional Pathway Enrichment via gprofiler2 ---
+top_candidate_genes <- unique(candidate_ranking$gene_symbol)
+
+gost_res <- gost(
+  query = top_candidate_genes,
+  organism = "mmusculus", # Change to 'hsapiens' if using human reference
+  sources = c("KEGG", "REAC", "GO:BP"),
+  user_threshold = 0.05,
+  correction_method = "fdr"
+)
+
+# Filter KEGG Pathways for Downstream Analysis
+if (!is.null(gost_res$result)) {
+  kegg_results <- as.data.table(gost_res$result)[source == "KEGG"]
+  fwrite(kegg_results[, .(term_id, p_value, term_name, intersection_size)], "kegg_pathway_enrichment.csv")
+  cat("\nTop Enriched KEGG Pathways successfully exported.\n")
+} else {
+  cat("\nNo significant pathways detected at current FDR threshold.\n")
+}
+
+# --- 6. Output Graphics ---
+ggsave("figure1a_global_concordance.png", plot = p1a, width = 6, height = 5, dpi = 300)
+ggsave("figure1b_spatial_asymmetry.png", plot = p1b, width = 7, height = 5, dpi = 300)
