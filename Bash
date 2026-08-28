@@ -1,0 +1,65 @@
+#!/bin/bash
+# ==============================================================================
+# Pipeline Step 1: Genomic Annotation & Intersection via Bedtools
+# Description: Processes base-level CpG methylation files, defines promoter 
+#              (TSS +/- 2kb) and gene body regions, and intersects loci 
+#              with a target pain-gene panel.
+# ==============================================================================
+
+set -euo pipefail
+
+# Define input files and outputs
+METHYLATION_BED="global_cpg_methylation.bed" # Format: chr, start, end, delta_meth(V5), naive_pct(V13), exp_pct(V14)
+ENSEMBL_GTF="Mus_musculus.GRCm39.gtf"
+PAIN_GENES_LIST="pain_associated_genes.txt"
+
+OUTPUT_PROMOTERS="promoter_cpg_intersect.bed"
+OUTPUT_GENE_BODIES="gene_body_cpg_intersect.bed"
+OUTPUT_PAIN_INTERSECT="pain_panel_cpg_intersect.bed"
+
+echo "=== Extracting Genomic Features from GTF ==="
+
+# 1. Extract Promoters (TSS +/- 2000 bp)
+awk '$3 == "gene" {
+    chr = $1; strand = $7; gene_name = "";
+    for (i=9; i<=NF; i++) {
+        if ($i == "gene_name") { gene_name = $(i+1); gsub(/[";]/, "", gene_name); break; }
+    }
+    if (strand == "+") {
+        start = ($4 - 2000 < 0) ? 0 : $4 - 2000;
+        end = $4 + 2000;
+    } else {
+        start = ($5 - 2000 < 0) ? 0 : $5 - 2000;
+        end = $5 + 2000;
+    }
+    print chr "\t" start "\t" end "\t" gene_name "\t.\t" strand;
+}' "$ENSEMBL_GTF" | sort -k1,1 -k2,2n > promoters_2kb.bed
+
+# 2. Extract Gene Bodies (TSS + 2000 bp to TES)
+awk '$3 == "gene" {
+    chr = $1; strand = $7; gene_name = "";
+    for (i=9; i<=NF; i++) {
+        if ($i == "gene_name") { gene_name = $(i+1); gsub(/[";]/, "", gene_name); break; }
+    }
+    if (strand == "+") {
+        start = $4 + 2000;
+        end = $5;
+    } else {
+        start = $4;
+        end = $5 - 2000;
+    }
+    if (end > start) {
+        print chr "\t" start "\t" end "\t" gene_name "\t.\t" strand;
+    }
+}' "$ENSEMBL_GTF" | sort -k1,1 -k2,2n > gene_bodies.bed
+
+echo "=== Executing Bedtools Intersections ==="
+
+# 3. Intersect methylation CpG loci with Promoters and Gene Bodies
+bedtools intersect -a "$METHYLATION_BED" -b promoters_2kb.bed -wa -wb > "$OUTPUT_PROMOTERS"
+bedtools intersect -a "$METHYLATION_BED" -b gene_bodies.bed -wa -wb > "$OUTPUT_GENE_BODIES"
+
+# 4. Filter CpG loci against the curated pain gene list
+grep -Fwf "$PAIN_GENES_LIST" "$OUTPUT_GENE_BODIES" > "$OUTPUT_PAIN_INTERSECT"
+
+echo "=== Data processing complete ==="
