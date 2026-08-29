@@ -1,4 +1,4 @@
-# Diss
+# Dissertation 
 # Chronic Pain Epigenomics Pipeline
 
 An end-to-end computational framework for base-level CpG DNA methylation analysis in chronic pain models. This repository contains the code to reproduce feature-specific spatial asymmetry mapping, locus prioritization, network topology analysis, and KEGG pathway over-representation analyses.
