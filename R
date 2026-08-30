@@ -1,8 +1,9 @@
 # ==============================================================================
 # Pipeline Step 2: Epigenomic Responsiveness, Candidate Ranking & Pathway Analysis
 # Description: Evaluates spatial methylation asymmetry, aggregates site-level
-#              shifts by gene, ranks top candidates, and performs functional
-#              pathway enrichment (gprofiler2).
+#              shifts by gene, ranks top candidates, performs functional
+#              pathway enrichment (gprofiler2), and constructs a binary gene-pathway
+#              membership matrix.
 # ==============================================================================
 
 # Load required libraries
@@ -70,13 +71,14 @@ top_candidate_genes <- unique(candidate_ranking$gene_symbol)
 
 gost_res <- gost(
   query = top_candidate_genes,
-  organism = "mmusculus", # Change to 'hsapiens' if using human reference
+  organism = "mmusculus",
   sources = c("KEGG", "REAC", "GO:BP"),
   user_threshold = 0.05,
-  correction_method = "fdr"
+  correction_method = "fdr",
+  evcodes = TRUE # Required to extract intersecting gene list string
 )
 
-# Filter KEGG Pathways for Downstream Analysis
+# Export Enriched KEGG Pathways
 if (!is.null(gost_res$result)) {
   kegg_results <- as.data.table(gost_res$result)[source == "KEGG"]
   fwrite(kegg_results[, .(term_id, p_value, term_name, intersection_size)], "kegg_pathway_enrichment.csv")
@@ -85,6 +87,24 @@ if (!is.null(gost_res$result)) {
   cat("\nNo significant pathways detected at current FDR threshold.\n")
 }
 
-# --- 6. Output Graphics ---
+# --- 6. Binary Pathway Membership Matrix (M_ij in {0, 1}) ---
+if (!is.null(gost_res$result) && nrow(kegg_results) > 0) {
+  # Build long table mapping each intersecting gene to its pathway term
+  membership_list <- lapply(seq_len(nrow(kegg_results)), function(i) {
+    genes <- unlist(strsplit(kegg_results$intersection[i], ","))
+    data.table(pathway = kegg_results$term_name[i], gene_symbol = genes, value = 1)
+  })
+  
+  membership_dt <- rbindlist(membership_list)
+  
+  # Pivot to wide binary matrix (Genes x Pathways)
+  binary_matrix <- dcast(membership_dt, gene_symbol ~ pathway, value.var = "value", fill = 0)
+  
+  # Export Binary Membership Matrix CSV
+  fwrite(binary_matrix, "binary_pathway_membership_matrix.csv")
+  cat("Binary pathway membership matrix successfully exported.\n")
+}
+
+# --- 7. Output Graphics ---
 ggsave("figure1a_global_concordance.png", plot = p1a, width = 6, height = 5, dpi = 300)
 ggsave("figure1b_spatial_asymmetry.png", plot = p1b, width = 7, height = 5, dpi = 300)
